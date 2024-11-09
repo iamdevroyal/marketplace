@@ -1,0 +1,151 @@
+additional tables
+CREATE TABLE password_resets (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    user_id INT NOT NULL,
+    token VARCHAR(64) NOT NULL,
+    expires_at DATETIME NOT NULL,
+    used TINYINT(1) NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    INDEX (token),
+    INDEX (expires_at)
+);
+
+CREATE TABLE discounts (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    code VARCHAR(50) UNIQUE NOT NULL,
+    type ENUM('percentage', 'fixed') NOT NULL,
+    value DECIMAL(10,2) NOT NULL,
+    active BOOLEAN DEFAULT TRUE,
+    expires_at DATETIME NULL,
+    usage_limit INT NULL,
+    usage_count INT DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE payments (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    order_id INT,
+    amount DECIMAL(10,2),
+    payment_method VARCHAR(50),
+    transaction_id VARCHAR(255),
+    status VARCHAR(50),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (order_id) REFERENCES orders(id)
+);
+
+
+// checkout-process.php
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $order_result = create_order($vendor_id);
+    if (isset($order_result['success'])) {
+        $payment_result = process_payment($order_result['order_id'], $_POST);
+        if (isset($payment_result['success'])) {
+            header('Location: /order-confirmation');
+            exit;
+        }
+        $error = $payment_result['error'];
+    }
+    $error = $order_result['error'];
+}
+
+
+// search.php
+$search_results = search_products([
+    'keyword' => $_GET['q'] ?? null,
+    'category_id' => $_GET['category'] ?? null,
+    'min_price' => $_GET['min_price'] ?? null,
+    'max_price' => $_GET['max_price'] ?? null,
+    'sort' => $_GET['sort'] ?? 'newest',
+    'page' => $_GET['page'] ?? 1
+]);
+
+
+
+
+// search.php
+function search_products($params) {
+    $db = get_db_connection();
+    
+    $conditions = [];
+    $values = [];
+    
+    $sql = "
+        SELECT p.*, v.name as vendor_name, v.slug as vendor_slug
+        FROM products p
+        JOIN vendors v ON p.vendor_id = v.id
+        WHERE 1=1
+    ";
+    
+    // Search by keyword
+    if (!empty($params['keyword'])) {
+        $conditions[] = "(p.name LIKE ? OR p.description LIKE ?)";
+        $keyword = "%{$params['keyword']}%";
+        $values[] = $keyword;
+        $values[] = $keyword;
+    }
+    
+    // Filter by vendor
+    if (!empty($params['vendor_id'])) {
+        $conditions[] = "p.vendor_id = ?";
+        $values[] = $params['vendor_id'];
+    }
+    
+    // Filter by category
+    if (!empty($params['category_id'])) {
+        $conditions[] = "p.category_id = ?";
+        $values[] = $params['category_id'];
+    }
+    
+    // Filter by price range
+    if (!empty($params['min_price'])) {
+        $conditions[] = "p.price >= ?";
+        $values[] = $params['min_price'];
+    }
+    if (!empty($params['max_price'])) {
+        $conditions[] = "p.price <= ?";
+        $values[] = $params['max_price'];
+    }
+    
+    // Add conditions to SQL
+    if (!empty($conditions)) {
+        $sql .= " AND " . implode(" AND ", $conditions);
+    }
+    
+    // Add sorting
+    $sql .= match ($params['sort'] ?? 'newest') {
+        'price_low' => " ORDER BY p.price ASC",
+        'price_high' => " ORDER BY p.price DESC",
+        'popular' => " ORDER BY p.sales_count DESC",
+        default => " ORDER BY p.created_at DESC"
+    };
+    
+    // Add pagination
+    $page = $params['page'] ?? 1;
+    $per_page = $params['per_page'] ?? 12;
+    $offset = ($page - 1) * $per_page;
+    
+    $sql .= " LIMIT ? OFFSET ?";
+    $values[] = $per_page;
+    $values[] = $offset;
+    
+    // Get total count for pagination
+    $count_sql = str_replace('SELECT p.*, v.name', 'SELECT COUNT(*)', $sql);
+    $count_sql = preg_replace('/LIMIT.*$/', '', $count_sql);
+    
+    $stmt = $db->prepare($count_sql);
+    $stmt->execute($values);
+    $total_count = $stmt->fetchColumn();
+    
+    // Get products
+    $stmt = $db->prepare($sql);
+    $stmt->execute($values);
+    $products = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    return [
+        'products' => $products,
+        'total' => $total_count,
+        'pages' => ceil($total_count / $per_page),
+        'current_page' => $page
+    ];
+}
